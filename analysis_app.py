@@ -6,11 +6,11 @@ import re
 # 페이지 설정
 # =========================
 st.set_page_config(
-    page_title="분반 가능 여부 분석",
+    page_title="분반 분석 시스템",
     layout="wide"
 )
 
-st.title("분반 가능 여부 분석 시스템")
+st.title("분반 가능 여부 분석 시스템 (실무용)")
 
 # =========================
 # 파일 업로드
@@ -28,11 +28,11 @@ def extract_year(filename):
     match = re.search(r"(20\d{2})", filename)
     return int(match.group(1)) if match else None
 
+
 # =========================
-# 컬럼 정리 함수
+# 컬럼 정리
 # =========================
 def clean_columns(df):
-
     df.columns = (
         df.columns.astype(str)
         .str.replace("\r", "", regex=False)
@@ -40,10 +40,7 @@ def clean_columns(df):
         .str.replace(" ", "", regex=False)
         .str.strip()
     )
-
-    # ! 같은 쓰레기 컬럼 제거
     df = df.loc[:, ~df.columns.str.contains("^!")]
-
     return df
 
 
@@ -59,10 +56,8 @@ if uploaded_files:
         try:
             if file.name.endswith(".csv"):
                 temp_df = pd.read_csv(file)
-
             elif file.name.lower().endswith(".xls"):
                 temp_df = pd.read_excel(file, engine="xlrd")
-
             else:
                 temp_df = pd.read_excel(file, engine="openpyxl")
 
@@ -70,22 +65,15 @@ if uploaded_files:
             st.error(f"{file.name} 읽기 실패: {e}")
             continue
 
-        # 컬럼 정리
         temp_df = clean_columns(temp_df)
-
-        # 연도 추가
         temp_df["연도"] = extract_year(file.name)
 
         dfs.append(temp_df)
 
-    if not dfs:
-        st.error("유효한 파일이 없습니다.")
-        st.stop()
-
     df = pd.concat(dfs, ignore_index=True)
 
     # =========================
-    # 컬럼 자동 매핑 (엑셀 깨짐 대응)
+    # 컬럼 매핑
     # =========================
     def find_col(names):
         for n in names:
@@ -100,15 +88,11 @@ if uploaded_files:
     col_category = find_col(["이수구분"])
 
     if col_enroll is None:
-        st.error("'수강인원' 컬럼을 찾을 수 없습니다.")
-        st.write("현재 컬럼:", df.columns.tolist())
+        st.error("수강인원 컬럼 없음")
+        st.write(df.columns.tolist())
         st.stop()
 
-    # =========================
-    # 표준 컬럼 변환
-    # =========================
     rename_map = {}
-
     if col_course: rename_map[col_course] = "course"
     if col_code: rename_map[col_code] = "code"
     if col_enroll: rename_map[col_enroll] = "enroll"
@@ -117,10 +101,20 @@ if uploaded_files:
 
     df = df.rename(columns=rename_map)
 
-    # 없는 컬럼 대비
+    # =========================
+    # 기본 컬럼 보정
+    # =========================
     for col in ["course", "code", "major", "category"]:
         if col not in df.columns:
             df[col] = ""
+
+    # 학수코드 완전 정규화
+    df["code"] = (
+        df["code"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+    )
 
     # 숫자 변환
     df["enroll"] = pd.to_numeric(df["enroll"], errors="coerce")
@@ -129,13 +123,13 @@ if uploaded_files:
     df = df.dropna(subset=["enroll", "연도"])
 
     # =========================
-    # 최근 2년 필터
+    # 최근 2년
     # =========================
     latest_year = df["연도"].max()
     df_2y = df[df["연도"] >= latest_year - 1]
 
     # =====================================================
-    # 분반 합산 (과목 + 연도)
+    # 분반 합산 (학수코드 + 연도 기준)
     # =====================================================
     yearly_sum = (
         df_2y.groupby(
@@ -179,35 +173,37 @@ if uploaded_files:
     ]
 
     # =========================
+    # 필터 (학과)
+    # =========================
+    majors = ["전체"] + sorted(result["개설전공"].unique().tolist())
+
+    selected_major = st.selectbox("전공 필터", majors)
+
+    if selected_major != "전체":
+        result = result[result["개설전공"] == selected_major]
+
+    # =========================
     # 검색
     # =========================
-    search = st.text_input("🔍 학수코드 / 교과목명 검색")
+    search = st.text_input("학수코드 / 교과목명 검색")
 
     if search:
         mask = (
             result["학수코드"].astype(str).str.contains(search, case=False, na=False) |
             result["교과목명"].astype(str).str.contains(search, case=False, na=False)
         )
-        filtered = result[mask]
-    else:
-        filtered = result
+        result = result[mask]
 
     # =========================
-    # 하이라이트
+    # 위험 과목 표시
     # =========================
-    def highlight(row):
-        return [
-            "background-color: yellow" if row["평균수강인원"] >= 60 else ""
-            for _ in row
-        ]
-
-    # =========================
-    # 출력
-    # =========================
-    st.subheader(f"결과 ({len(filtered)}개)")
+    st.subheader("결과")
 
     st.dataframe(
-        filtered.style.apply(highlight, axis=1),
+        result.style.apply(
+            lambda row: ["background-color: yellow" if row["평균수강인원"] >= 60 else "" for _ in row],
+            axis=1
+        ),
         use_container_width=True
     )
 
